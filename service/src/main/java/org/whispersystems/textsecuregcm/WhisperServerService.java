@@ -122,6 +122,7 @@ import org.whispersystems.textsecuregcm.controllers.ProfileController;
 import org.whispersystems.textsecuregcm.controllers.ProvisioningController;
 import org.whispersystems.textsecuregcm.controllers.RegistrationController;
 import org.whispersystems.textsecuregcm.controllers.RemoteConfigController;
+import org.whispersystems.textsecuregcm.controllers.RemoteConfigControllerV1;
 import org.whispersystems.textsecuregcm.controllers.SecureStorageController;
 import org.whispersystems.textsecuregcm.controllers.SecureValueRecovery2Controller;
 import org.whispersystems.textsecuregcm.controllers.SecureValueRecoveryBController;
@@ -205,7 +206,7 @@ import org.whispersystems.textsecuregcm.registration.RegistrationServiceClient;
 import org.whispersystems.textsecuregcm.s3.PolicySigner;
 import org.whispersystems.textsecuregcm.s3.PostPolicyGenerator;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
-import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
+import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecoveryClient;
 import org.whispersystems.textsecuregcm.spam.ChallengeConstraintChecker;
 import org.whispersystems.textsecuregcm.spam.RegistrationFraudChecker;
 import org.whispersystems.textsecuregcm.spam.RegistrationRecoveryChecker;
@@ -271,6 +272,7 @@ import org.whispersystems.textsecuregcm.workers.BackupUsageRecalculationCommand;
 import org.whispersystems.textsecuregcm.workers.CertificateCommand;
 import org.whispersystems.textsecuregcm.workers.CheckDynamicConfigurationCommand;
 import org.whispersystems.textsecuregcm.workers.DeleteUserCommand;
+import org.whispersystems.textsecuregcm.workers.EncryptDeviceCreationTimestampCommand;
 import org.whispersystems.textsecuregcm.workers.IdleDeviceNotificationSchedulerFactory;
 import org.whispersystems.textsecuregcm.workers.MessagePersisterServiceCommand;
 import org.whispersystems.textsecuregcm.workers.NotifyIdleDevicesCommand;
@@ -345,6 +347,7 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
         new IdleDeviceNotificationSchedulerFactory()));
 
     bootstrap.addCommand(new RegenerateSecondaryDynamoDbTableDataCommand());
+    bootstrap.addCommand(new EncryptDeviceCreationTimestampCommand());
   }
 
   @Override
@@ -508,8 +511,8 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
         .maxThreads(1).minThreads(1).build();
     ExecutorService fcmSenderExecutor = environment.lifecycle().executorService(name(getClass(), "fcmSender-%d"))
         .maxThreads(32).minThreads(32).workQueue(fcmSenderQueue).build();
-    ExecutorService secureValueRecovery2ServiceExecutor = environment.lifecycle()
-        .executorService(name(getClass(), "secureValueRecoveryService2-%d")).maxThreads(1).minThreads(1).build();
+    ExecutorService secureValueRecoveryServiceExecutor = environment.lifecycle()
+        .executorService(name(getClass(), "secureValueRecoveryService-%d")).maxThreads(1).minThreads(1).build();
     ExecutorService storageServiceExecutor = environment.lifecycle()
         .executorService(name(getClass(), "storageService-%d")).maxThreads(1).minThreads(1).build();
     ExecutorService virtualThreadEventLoggerExecutor = environment.lifecycle()
@@ -624,8 +627,18 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
         config.getKeyTransparencyServiceConfiguration().tlsCertificate(),
         config.getKeyTransparencyServiceConfiguration().clientCertificate(),
         config.getKeyTransparencyServiceConfiguration().clientPrivateKey().value());
-    SecureValueRecovery2Client secureValueRecovery2Client = new SecureValueRecovery2Client(svr2CredentialsGenerator,
-        secureValueRecovery2ServiceExecutor, secureValueRecoveryServiceRetryExecutor, config.getSvr2Configuration());
+    SecureValueRecoveryClient secureValueRecovery2Client = new SecureValueRecoveryClient(
+        svr2CredentialsGenerator,
+        secureValueRecoveryServiceExecutor,
+        secureValueRecoveryServiceRetryExecutor,
+        config.getSvr2Configuration(),
+        () -> dynamicConfigurationManager.getConfiguration().getSvr2StatusCodesToIgnoreForAccountDeletion());
+    SecureValueRecoveryClient secureValueRecoveryBClient = new SecureValueRecoveryClient(
+        svrbCredentialsGenerator,
+        secureValueRecoveryServiceExecutor,
+        secureValueRecoveryServiceRetryExecutor,
+        config.getSvrbConfiguration(),
+        () -> dynamicConfigurationManager.getConfiguration().getSvrbStatusCodesToIgnoreForAccountDeletion());
     SecureStorageClient secureStorageClient = new SecureStorageClient(storageCredentialsGenerator,
         storageServiceExecutor, storageServiceRetryExecutor, config.getSecureStorageServiceConfiguration());
     DisconnectionRequestManager disconnectionRequestManager = new DisconnectionRequestManager(pubsubClient, disconnectionRequestListenerExecutor);
@@ -646,7 +659,7 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
         new ClientPublicKeysManager(clientPublicKeys, accountLockManager, accountLockExecutor);
     AccountsManager accountsManager = new AccountsManager(accounts, phoneNumberIdentifiers, cacheCluster,
         pubsubClient, accountLockManager, keysManager, messagesManager, profilesManager,
-        secureStorageClient, secureValueRecovery2Client, disconnectionRequestManager,
+        secureStorageClient, secureValueRecovery2Client, secureValueRecoveryBClient, disconnectionRequestManager,
         registrationRecoveryPasswordsManager, clientPublicKeysManager, accountLockExecutor, messagePollExecutor,
         clock, config.getLinkDeviceSecretConfiguration().secret().value(), dynamicConfigurationManager);
     RemoteConfigsManager remoteConfigsManager = new RemoteConfigsManager(remoteConfigs);
@@ -689,7 +702,7 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
 
     final AccountAuthenticator accountAuthenticator = new AccountAuthenticator(accountsManager);
 
-    final MessageSender messageSender = new MessageSender(messagesManager, pushNotificationManager, experimentEnrollmentManager);
+    final MessageSender messageSender = new MessageSender(messagesManager, pushNotificationManager);
     final ReceiptSender receiptSender = new ReceiptSender(accountsManager, messageSender, receiptSenderExecutor);
     final CloudflareTurnCredentialsManager cloudflareTurnCredentialsManager = new CloudflareTurnCredentialsManager(
         config.getTurnConfiguration().cloudflare().apiToken().value(),
@@ -726,7 +739,6 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
         cacheCluster, config.getPaymentsServiceConfiguration().paymentCurrencies(), recurringJobExecutor, Clock.systemUTC());
     VirtualThreadPinEventMonitor virtualThreadPinEventMonitor = new VirtualThreadPinEventMonitor(
         virtualThreadEventLoggerExecutor,
-        () -> dynamicConfigurationManager.getConfiguration().getVirtualThreads().allowedPinEvents(),
         config.getVirtualThreadConfiguration().pinEventThreshold());
 
     StripeManager stripeManager = new StripeManager(config.getStripe().apiKey().value(), subscriptionProcessorExecutor,
@@ -1121,6 +1133,7 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
         new ProvisioningController(rateLimiters, provisioningManager),
         new RegistrationController(accountsManager, phoneVerificationTokenManager, registrationLockVerificationManager,
             rateLimiters),
+        new RemoteConfigControllerV1(remoteConfigsManager, config.getRemoteConfigConfiguration().globalConfig(), clock),
         new RemoteConfigController(remoteConfigsManager, config.getRemoteConfigConfiguration().globalConfig(), clock),
         new SecureStorageController(storageCredentialsGenerator),
         new SecureValueRecovery2Controller(svr2CredentialsGenerator, accountsManager),

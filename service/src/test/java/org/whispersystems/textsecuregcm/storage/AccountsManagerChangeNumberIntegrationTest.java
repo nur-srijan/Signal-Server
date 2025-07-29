@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -28,7 +29,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.signal.libsignal.protocol.IdentityKey;
-import org.signal.libsignal.protocol.ecc.Curve;
 import org.signal.libsignal.protocol.ecc.ECKeyPair;
 import org.whispersystems.textsecuregcm.auth.DisconnectionRequestManager;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
@@ -41,7 +41,7 @@ import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
-import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
+import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecoveryClient;
 import org.whispersystems.textsecuregcm.storage.DynamoDbExtensionSchema.Tables;
 import org.whispersystems.textsecuregcm.tests.util.AccountsHelper;
 import org.whispersystems.textsecuregcm.tests.util.KeysHelper;
@@ -126,8 +126,8 @@ class AccountsManagerChangeNumberIntegrationTest {
       final SecureStorageClient secureStorageClient = mock(SecureStorageClient.class);
       when(secureStorageClient.deleteStoredData(any())).thenReturn(CompletableFuture.completedFuture(null));
 
-      final SecureValueRecovery2Client svr2Client = mock(SecureValueRecovery2Client.class);
-      when(svr2Client.deleteBackups(any())).thenReturn(CompletableFuture.completedFuture(null));
+      final SecureValueRecoveryClient svr2Client = mock(SecureValueRecoveryClient.class);
+      when(svr2Client.removeData(any())).thenReturn(CompletableFuture.completedFuture(null));
 
       disconnectionRequestManager = mock(DisconnectionRequestManager.class);
 
@@ -138,7 +138,7 @@ class AccountsManagerChangeNumberIntegrationTest {
       when(messagesManager.clear(any())).thenReturn(CompletableFuture.completedFuture(null));
 
       final ProfilesManager profilesManager = mock(ProfilesManager.class);
-      when(profilesManager.deleteAll(any())).thenReturn(CompletableFuture.completedFuture(null));
+      when(profilesManager.deleteAll(any(), anyBoolean())).thenReturn(CompletableFuture.completedFuture(null));
 
       final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager =
           mock(RegistrationRecoveryPasswordsManager.class);
@@ -156,6 +156,7 @@ class AccountsManagerChangeNumberIntegrationTest {
           messagesManager,
           profilesManager,
           secureStorageClient,
+          svr2Client,
           svr2Client,
           disconnectionRequestManager,
           registrationRecoveryPasswordsManager,
@@ -185,7 +186,7 @@ class AccountsManagerChangeNumberIntegrationTest {
     final UUID originalUuid = account.getUuid();
     final UUID originalPni = account.getPhoneNumberIdentifier();
 
-    final ECKeyPair pniIdentityKeyPair = Curve.generateKeyPair();
+    final ECKeyPair pniIdentityKeyPair = ECKeyPair.generate();
 
     accountsManager.changeNumber(account,
         secondNumber,
@@ -206,11 +207,37 @@ class AccountsManagerChangeNumberIntegrationTest {
   }
 
   @Test
+  void testChangeNumberSameNumber() throws InterruptedException, MismatchedDevicesException {
+    final String originalNumber = "+18005551111";
+    final Account account = AccountsHelper.createAccount(accountsManager, originalNumber);
+
+    final UUID originalUuid = account.getUuid();
+    final UUID originalPni = account.getPhoneNumberIdentifier();
+
+    final ECKeyPair pniIdentityKeyPair = ECKeyPair.generate();
+
+    accountsManager.changeNumber(account,
+        originalNumber,
+        new IdentityKey(pniIdentityKeyPair.getPublicKey()),
+        Map.of(Device.PRIMARY_ID, KeysHelper.signedECPreKey(1, pniIdentityKeyPair)),
+        Map.of(Device.PRIMARY_ID, KeysHelper.signedKEMPreKey(2, pniIdentityKeyPair)),
+        Map.of(Device.PRIMARY_ID, 1));
+
+    final Account updatedAccount = accountsManager.getByE164(originalNumber).orElseThrow();
+    assertEquals(originalUuid, updatedAccount.getUuid());
+    assertEquals(originalNumber, updatedAccount.getNumber());
+    assertEquals(originalPni, updatedAccount.getPhoneNumberIdentifier());
+
+    assertEquals(Optional.empty(), accountsManager.findRecentlyDeletedAccountIdentifier(originalPni));
+    assertEquals(Optional.empty(), accountsManager.findRecentlyDeletedAccountIdentifier(updatedAccount.getPhoneNumberIdentifier()));
+  }
+
+  @Test
   void testChangeNumberWithPniExtensions() throws InterruptedException, MismatchedDevicesException {
     final String originalNumber = "+18005551111";
     final String secondNumber = "+18005552222";
     final int rotatedPniRegistrationId = 17;
-    final ECKeyPair rotatedPniIdentityKeyPair = Curve.generateKeyPair();
+    final ECKeyPair rotatedPniIdentityKeyPair = ECKeyPair.generate();
     final ECSignedPreKey rotatedSignedPreKey = KeysHelper.signedECPreKey(1L, rotatedPniIdentityKeyPair);
     final KEMSignedPreKey rotatedKemSignedPreKey = KeysHelper.signedKEMPreKey(2L, rotatedPniIdentityKeyPair);
     final AccountAttributes accountAttributes = new AccountAttributes(true, rotatedPniRegistrationId + 1, rotatedPniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, Set.of());
@@ -259,8 +286,8 @@ class AccountsManagerChangeNumberIntegrationTest {
     final UUID originalUuid = account.getUuid();
     final UUID originalPni = account.getPhoneNumberIdentifier();
 
-    final ECKeyPair originalIdentityKeyPair = Curve.generateKeyPair();
-    final ECKeyPair secondIdentityKeyPair = Curve.generateKeyPair();
+    final ECKeyPair originalIdentityKeyPair = ECKeyPair.generate();
+    final ECKeyPair secondIdentityKeyPair = ECKeyPair.generate();
 
     account = accountsManager.changeNumber(account,
         secondNumber,
@@ -300,8 +327,8 @@ class AccountsManagerChangeNumberIntegrationTest {
     final UUID originalUuid = account.getUuid();
     final UUID originalPni = account.getPhoneNumberIdentifier();
 
-    final ECKeyPair originalIdentityKeyPair = Curve.generateKeyPair();
-    final ECKeyPair secondIdentityKeyPair = Curve.generateKeyPair();
+    final ECKeyPair originalIdentityKeyPair = ECKeyPair.generate();
+    final ECKeyPair secondIdentityKeyPair = ECKeyPair.generate();
 
     final Account existingAccount = AccountsHelper.createAccount(accountsManager, secondNumber);
 
@@ -353,7 +380,7 @@ class AccountsManagerChangeNumberIntegrationTest {
     final Account existingAccount = AccountsHelper.createAccount(accountsManager, secondNumber);
 
     final UUID existingAccountUuid = existingAccount.getUuid();
-    final ECKeyPair pniIdentityKeyPair = Curve.generateKeyPair();
+    final ECKeyPair pniIdentityKeyPair = ECKeyPair.generate();
 
     final Account changedNumberAccount = accountsManager.changeNumber(account,
         secondNumber,
@@ -372,7 +399,7 @@ class AccountsManagerChangeNumberIntegrationTest {
     assertEquals(Optional.empty(), accountsManager.findRecentlyDeletedAccountIdentifier(originalPni));
     assertEquals(Optional.empty(), accountsManager.findRecentlyDeletedAccountIdentifier(secondPni));
 
-    final ECKeyPair reRegisteredPniIdentityKeyPair = Curve.generateKeyPair();
+    final ECKeyPair reRegisteredPniIdentityKeyPair = ECKeyPair.generate();
 
     final Account changedNumberReRegisteredAccount = accountsManager.changeNumber(reRegisteredAccount,
         secondNumber,

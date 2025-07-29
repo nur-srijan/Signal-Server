@@ -8,6 +8,7 @@ package org.whispersystems.textsecuregcm.backup;
 import com.google.common.annotations.VisibleForTesting;
 import io.dropwizard.util.DataSize;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tag;
@@ -25,7 +26,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Function;
 import org.apache.commons.lang3.StringUtils;
-import org.signal.libsignal.protocol.ecc.Curve;
+import org.signal.libsignal.protocol.ecc.ECKeyPair;
 import org.signal.libsignal.protocol.ecc.ECPublicKey;
 import org.signal.libsignal.zkgroup.GenericServerSecretParams;
 import org.signal.libsignal.zkgroup.VerificationFailedException;
@@ -54,6 +55,7 @@ public class BackupManager {
 
   static final String MESSAGE_BACKUP_NAME = "messageBackup";
   public static final long MAX_TOTAL_BACKUP_MEDIA_BYTES = DataSize.gibibytes(100).toBytes();
+  public static final long MAX_MESSAGE_BACKUP_OBJECT_SIZE = DataSize.mebibytes(101).toBytes();
   public static final long MAX_MEDIA_OBJECT_SIZE = DataSize.mebibytes(101).toBytes();
 
   // If the last media usage recalculation is over MAX_QUOTA_STALENESS, force a recalculation before quota enforcement.
@@ -525,7 +527,7 @@ public class BackupManager {
     }
   }
 
-  private static final ECPublicKey INVALID_PUBLIC_KEY = Curve.generateKeyPair().getPublicKey();
+  private static final ECPublicKey INVALID_PUBLIC_KEY = ECKeyPair.generate().getPublicKey();
 
   /**
    * Authenticate the ZK anonymous backup credential's presentation

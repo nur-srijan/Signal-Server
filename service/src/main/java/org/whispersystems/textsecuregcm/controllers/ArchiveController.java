@@ -505,6 +505,7 @@ public class ArchiveController {
       description = "Retrieve an upload form that can be used to perform a resumable upload of a message backup.")
   @ApiResponse(responseCode = "200", content = @Content(schema = @Schema(implementation = UploadDescriptorResponse.class)))
   @ApiResponse(responseCode = "429", description = "Rate limited.")
+  @ApiResponse(responseCode = "413", description = "The provided uploadLength is larger than the maximum supported upload size. The maximum upload size is subject to change.")
   @ApiResponseZkAuth
   public CompletionStage<UploadDescriptorResponse> backup(
       @Auth final Optional<AuthenticatedDevice> account,
@@ -516,12 +517,24 @@ public class ArchiveController {
 
       @Parameter(description = BackupAuthCredentialPresentationSignature.DESCRIPTION, schema = @Schema(implementation = String.class))
       @NotNull
-      @HeaderParam(X_SIGNAL_ZK_AUTH_SIGNATURE) final BackupAuthCredentialPresentationSignature signature) {
+      @HeaderParam(X_SIGNAL_ZK_AUTH_SIGNATURE) final BackupAuthCredentialPresentationSignature signature,
+
+      @Parameter(description = "The size of the message backup to upload in bytes")
+      @QueryParam("uploadLength") final Optional<Long> uploadLength) {
     if (account.isPresent()) {
       throw new BadRequestException("must not use authenticated connection for anonymous operations");
     }
     return backupManager.authenticateBackupUser(presentation.presentation, signature.signature, userAgent)
-        .thenCompose(backupManager::createMessageBackupUploadDescriptor)
+        .thenCompose(backupUser -> {
+          final boolean oversize = uploadLength
+              .map(length -> length > BackupManager.MAX_MESSAGE_BACKUP_OBJECT_SIZE)
+              .orElse(false);
+          backupMetrics.updateMessageBackupSizeDistribution(backupUser, oversize, uploadLength);
+          if (oversize) {
+            throw new ClientErrorException("exceeded maximum uploadLength", Response.Status.REQUEST_ENTITY_TOO_LARGE);
+          }
+          return backupManager.createMessageBackupUploadDescriptor(backupUser);
+        })
         .thenApply(result -> new UploadDescriptorResponse(
             result.cdn(),
             result.key(),

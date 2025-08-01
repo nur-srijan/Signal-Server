@@ -504,7 +504,6 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
         messageDeliveryQueue);
 
     ScheduledExecutorService recurringJobExecutor = ScheduledExecutorServiceBuilder.of(environment, "recurringJob").threads(6).build();
-    ScheduledExecutorService websocketScheduledExecutor = ScheduledExecutorServiceBuilder.of(environment, "websocket").threads(8).build();
     ExecutorService apnSenderExecutor = ExecutorServiceBuilder.of(environment, "apnSender")
         .maxThreads(1).minThreads(1).build();
     ExecutorService fcmSenderExecutor = ExecutorServiceBuilder.of(environment, "fcmSender")
@@ -656,7 +655,7 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
     PushNotificationManager pushNotificationManager =
         new PushNotificationManager(accountsManager, apnSender, fcmSender, pushNotificationScheduler);
     RedisMessageAvailabilityManager redisMessageAvailabilityManager =
-        new RedisMessageAvailabilityManager(accountsManager, pushNotificationManager, messagesCluster, clientEventExecutor, asyncOperationQueueingExecutor);
+        new RedisMessageAvailabilityManager(messagesCluster, clientEventExecutor, asyncOperationQueueingExecutor);
     RateLimiters rateLimiters = RateLimiters.create(dynamicConfigurationManager, rateLimitersCluster);
     ProvisioningManager provisioningManager = new ProvisioningManager(pubsubClient);
     IssuedReceiptsManager issuedReceiptsManager = new IssuedReceiptsManager(
@@ -996,7 +995,7 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
         config.idlePrimaryDeviceReminderConfiguration().minIdleDuration(), Clock.systemUTC()));
     webSocketEnvironment.setConnectListener(
         new AuthenticatedConnectListener(accountsManager, receiptSender, messagesManager, messageMetrics, pushNotificationManager,
-            pushNotificationScheduler, redisMessageAvailabilityManager, disconnectionRequestManager, websocketScheduledExecutor,
+            pushNotificationScheduler, redisMessageAvailabilityManager, disconnectionRequestManager,
             messageDeliveryScheduler, clientReleaseManager, messageDeliveryLoopMonitor, experimentEnrollmentManager));
     webSocketEnvironment.jersey().register(new RateLimitByIpFilter(rateLimiters));
     webSocketEnvironment.jersey().register(new RequestStatisticsFilter(TrafficSource.WEBSOCKET));

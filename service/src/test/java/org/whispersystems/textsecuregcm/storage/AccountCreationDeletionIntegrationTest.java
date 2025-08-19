@@ -109,8 +109,7 @@ public class AccountCreationDeletionIntegrationTest {
         new RepeatedUseECSignedPreKeyStore(dynamoDbAsyncClient,
             DynamoDbExtensionSchema.Tables.REPEATED_USE_EC_SIGNED_PRE_KEYS.tableName()),
         new RepeatedUseKEMSignedPreKeyStore(dynamoDbAsyncClient,
-            DynamoDbExtensionSchema.Tables.REPEATED_USE_KEM_SIGNED_PRE_KEYS.tableName()),
-        mock(ExperimentEnrollmentManager.class));
+            DynamoDbExtensionSchema.Tables.REPEATED_USE_KEM_SIGNED_PRE_KEYS.tableName()));
 
     final ClientPublicKeys clientPublicKeys = new ClientPublicKeys(DYNAMO_DB_EXTENSION.getDynamoDbAsyncClient(),
         DynamoDbExtensionSchema.Tables.CLIENT_PUBLIC_KEYS.tableName());
@@ -137,7 +136,7 @@ public class AccountCreationDeletionIntegrationTest {
     when(secureStorageClient.deleteStoredData(any())).thenReturn(CompletableFuture.completedFuture(null));
 
     final SecureValueRecoveryClient svr2Client = mock(SecureValueRecoveryClient.class);
-    when(svr2Client.removeData(any())).thenReturn(CompletableFuture.completedFuture(null));
+    when(svr2Client.removeData(any(UUID.class))).thenReturn(CompletableFuture.completedFuture(null));
 
     final PhoneNumberIdentifiers phoneNumberIdentifiers =
         new PhoneNumberIdentifiers(DYNAMO_DB_EXTENSION.getDynamoDbAsyncClient(),
@@ -168,7 +167,6 @@ public class AccountCreationDeletionIntegrationTest {
         messagesManager,
         profilesManager,
         secureStorageClient,
-        svr2Client,
         svr2Client,
         disconnectionRequestManager,
         registrationRecoveryPasswordsManager,

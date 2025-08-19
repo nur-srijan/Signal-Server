@@ -37,6 +37,7 @@ import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -52,6 +53,7 @@ import org.whispersystems.textsecuregcm.metrics.MessageMetrics;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
 import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
 import org.whispersystems.textsecuregcm.push.ReceiptSender;
+import org.whispersystems.textsecuregcm.push.RedisMessageAvailabilityManager;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.ClientReleaseManager;
@@ -68,6 +70,7 @@ import org.whispersystems.websocket.messages.WebSocketResponseMessage;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
+@Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class WebSocketConnectionIntegrationTest {
 
   @RegisterExtension
@@ -79,6 +82,7 @@ class WebSocketConnectionIntegrationTest {
   private ExecutorService sharedExecutorService;
   private MessagesDynamoDb messagesDynamoDb;
   private MessagesCache messagesCache;
+  private RedisMessageAvailabilityManager redisMessageAvailabilityManager;
   private ReportMessageManager reportMessageManager;
   private Account account;
   private Device device;
@@ -101,6 +105,7 @@ class WebSocketConnectionIntegrationTest {
     messagesDynamoDb = new MessagesDynamoDb(DYNAMO_DB_EXTENSION.getDynamoDbClient(),
         DYNAMO_DB_EXTENSION.getDynamoDbAsyncClient(), Tables.MESSAGES.tableName(), Duration.ofDays(7),
         sharedExecutorService);
+    redisMessageAvailabilityManager = new RedisMessageAvailabilityManager(REDIS_CLUSTER_EXTENSION.getRedisCluster(), sharedExecutorService, sharedExecutorService);
     reportMessageManager = mock(ReportMessageManager.class);
     account = mock(Account.class);
     device = mock(Device.class);
@@ -128,8 +133,8 @@ class WebSocketConnectionIntegrationTest {
   void testProcessStoredMessages(final int persistedMessageCount, final int cachedMessageCount) {
     final WebSocketConnection webSocketConnection = new WebSocketConnection(
         mock(ReceiptSender.class),
-        new MessagesManager(messagesDynamoDb, messagesCache, reportMessageManager, sharedExecutorService, Clock.systemUTC()),
-        new MessageMetrics(),
+        new MessagesManager(messagesDynamoDb, messagesCache, redisMessageAvailabilityManager, reportMessageManager, sharedExecutorService, Clock.systemUTC()),
+        new MessageMetrics(Duration.ofDays(30)),
         mock(PushNotificationManager.class),
         mock(PushNotificationScheduler.class),
         account,
@@ -217,8 +222,8 @@ class WebSocketConnectionIntegrationTest {
   void testProcessStoredMessagesClientClosed() {
     final WebSocketConnection webSocketConnection = new WebSocketConnection(
         mock(ReceiptSender.class),
-        new MessagesManager(messagesDynamoDb, messagesCache, reportMessageManager, sharedExecutorService, Clock.systemUTC()),
-        new MessageMetrics(),
+        new MessagesManager(messagesDynamoDb, messagesCache, redisMessageAvailabilityManager, reportMessageManager, sharedExecutorService, Clock.systemUTC()),
+        new MessageMetrics(Duration.ofDays(30)),
         mock(PushNotificationManager.class),
         mock(PushNotificationScheduler.class),
         account,
@@ -268,105 +273,6 @@ class WebSocketConnectionIntegrationTest {
           eq("/api/v1/message"), anyList(), messageBodyCaptor.capture());
       verify(webSocketClient, never()).sendRequest(eq("PUT"), eq("/api/v1/queue/empty"), anyList(),
           eq(Optional.empty()));
-
-      final List<MessageProtos.Envelope> sentMessages = messageBodyCaptor.getAllValues().stream()
-          .map(Optional::get)
-          .map(messageBytes -> {
-            try {
-              return Envelope.parseFrom(messageBytes);
-            } catch (InvalidProtocolBufferException e) {
-              throw new RuntimeException(e);
-            }
-          }).toList();
-
-      assertTrue(expectedMessages.containsAll(sentMessages));
-    });
-  }
-
-  @Test
-  void testProcessStoredMessagesSendFutureTimeout() {
-    final WebSocketConnection webSocketConnection = new WebSocketConnection(
-        mock(ReceiptSender.class),
-        new MessagesManager(messagesDynamoDb, messagesCache, reportMessageManager, sharedExecutorService, Clock.systemUTC()),
-        new MessageMetrics(),
-        mock(PushNotificationManager.class),
-        mock(PushNotificationScheduler.class),
-        account,
-        device,
-        webSocketClient,
-        1000, // use a short timeout, so that this test completes quickly
-        messageDeliveryScheduler,
-        clientReleaseManager,
-        mock(MessageDeliveryLoopMonitor.class),
-        mock(ExperimentEnrollmentManager.class));
-
-    final int persistedMessageCount = 207;
-    final int cachedMessageCount = 173;
-
-    final List<MessageProtos.Envelope> expectedMessages = new ArrayList<>(persistedMessageCount + cachedMessageCount);
-
-    assertTimeoutPreemptively(Duration.ofSeconds(15), () -> {
-
-      {
-        final List<MessageProtos.Envelope> persistedMessages = new ArrayList<>(persistedMessageCount);
-
-        for (int i = 0; i < persistedMessageCount; i++) {
-          final MessageProtos.Envelope envelope = generateRandomMessage(UUID.randomUUID());
-          persistedMessages.add(envelope);
-          expectedMessages.add(envelope);
-        }
-
-        messagesDynamoDb.store(persistedMessages, account.getIdentifier(IdentityType.ACI), device);
-      }
-
-      for (int i = 0; i < cachedMessageCount; i++) {
-        final UUID messageGuid = UUID.randomUUID();
-        final MessageProtos.Envelope envelope = generateRandomMessage(messageGuid);
-        messagesCache.insert(messageGuid, account.getIdentifier(IdentityType.ACI), device.getId(), envelope).join();
-
-        expectedMessages.add(envelope);
-      }
-
-      final WebSocketResponseMessage successResponse = mock(WebSocketResponseMessage.class);
-      when(successResponse.getStatus()).thenReturn(200);
-
-      final CompletableFuture<WebSocketResponseMessage> neverCompleting = new CompletableFuture<>();
-
-      // for the first message, return a future that never completes
-      when(webSocketClient.sendRequest(eq("PUT"), eq("/api/v1/message"), anyList(), any()))
-          .thenReturn(neverCompleting)
-          .thenReturn(CompletableFuture.completedFuture(successResponse));
-
-      when(webSocketClient.isOpen()).thenReturn(true);
-
-      final AtomicBoolean queueCleared = new AtomicBoolean(false);
-
-      when(webSocketClient.sendRequest(eq("PUT"), eq("/api/v1/queue/empty"), anyList(), any())).thenAnswer(
-          (Answer<CompletableFuture<WebSocketResponseMessage>>) invocation -> {
-            synchronized (queueCleared) {
-              queueCleared.set(true);
-              queueCleared.notifyAll();
-            }
-
-            return CompletableFuture.completedFuture(successResponse);
-          });
-
-      webSocketConnection.processStoredMessages();
-
-      synchronized (queueCleared) {
-        while (!queueCleared.get()) {
-          queueCleared.wait();
-        }
-      }
-
-      //noinspection unchecked
-      ArgumentCaptor<Optional<byte[]>> messageBodyCaptor = ArgumentCaptor.forClass(Optional.class);
-
-      // We expect all of the messages from both pools to be sent, plus one for the future that times out
-      verify(webSocketClient, atMost(persistedMessageCount + cachedMessageCount + 1))
-          .sendRequest(eq("PUT"), eq("/api/v1/message"), anyList(), messageBodyCaptor.capture());
-
-      verify(webSocketClient).sendRequest(eq("PUT"), eq("/api/v1/queue/empty"), anyList(), eq(Optional.empty()));
 
       final List<MessageProtos.Envelope> sentMessages = messageBodyCaptor.getAllValues().stream()
           .map(Optional::get)

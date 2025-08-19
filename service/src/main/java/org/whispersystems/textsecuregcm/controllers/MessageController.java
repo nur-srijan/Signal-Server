@@ -110,7 +110,6 @@ import org.whispersystems.textsecuregcm.storage.PhoneNumberIdentifiers;
 import org.whispersystems.textsecuregcm.storage.ReportMessageManager;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
 import org.whispersystems.textsecuregcm.util.Util;
-import org.whispersystems.textsecuregcm.websocket.WebSocketConnection;
 import org.whispersystems.websocket.WebsocketHeaders;
 import reactor.core.scheduler.Scheduler;
 
@@ -153,13 +152,20 @@ public class MessageController {
     INDIVIDUAL_MESSAGE_LATENCY_TIMER = Timer.builder(timerName)
         .tags(multiRecipientTagName, "false")
         .publishPercentileHistogram(true)
+        .minimumExpectedValue(Duration.ofMillis(1))
+        .minimumExpectedValue(Duration.ofSeconds(10))
         .register(Metrics.globalRegistry);
 
     MULTI_RECIPIENT_MESSAGE_LATENCY_TIMER = Timer.builder(timerName)
         .tags(multiRecipientTagName, "true")
         .publishPercentileHistogram(true)
+        .minimumExpectedValue(Duration.ofMillis(1))
+        .minimumExpectedValue(Duration.ofSeconds(10))
         .register(Metrics.globalRegistry);
   }
+
+  private static final String INCORRECT_SYNC_MESSAGE_REGISTRATION_IDS_COUNTER_NAME =
+      MetricsUtil.name(MessageController.class, "incorrectSyncMessageRegistrationIds");
 
   // The Signal desktop client (really, JavaScript in general) can handle message timestamps at most 100,000,000 days
   // past the epoch; please see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date#the_epoch_timestamps_and_invalid_date
@@ -452,6 +458,12 @@ public class MessageController {
           userAgent);
     } catch (final MismatchedDevicesException e) {
       if (!e.getMismatchedDevices().staleDeviceIds().isEmpty()) {
+        if (messageType == MessageType.SYNC) {
+          Metrics.counter(INCORRECT_SYNC_MESSAGE_REGISTRATION_IDS_COUNTER_NAME,
+              Tags.of(UserAgentTagUtil.getPlatformTag(userAgent)))
+                  .increment();
+        }
+
         throw new WebApplicationException(Response.status(410)
             .type(MediaType.APPLICATION_JSON)
             .entity(new StaleDevicesResponse(e.getMismatchedDevices().staleDeviceIds()))
@@ -841,15 +853,8 @@ public class MessageController {
     final Device device = account.getDevice(auth.deviceId())
         .orElseThrow(() -> new WebApplicationException(Status.UNAUTHORIZED));
 
-    return messagesManager.delete(
-            auth.accountIdentifier(),
-            device,
-            uuid,
-            null)
+    return messagesManager.delete(auth.accountIdentifier(), device, uuid, null)
         .thenAccept(maybeRemovedMessage -> maybeRemovedMessage.ifPresent(removedMessage -> {
-
-          WebSocketConnection.recordMessageDeliveryDuration(removedMessage.serverTimestamp(), device);
-
           if (removedMessage.sourceServiceId().isPresent()
               && removedMessage.envelopeType() != Type.SERVER_DELIVERY_RECEIPT) {
             if (removedMessage.sourceServiceId().get() instanceof AciServiceIdentifier aciServiceIdentifier) {

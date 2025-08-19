@@ -394,6 +394,8 @@ public class DeviceController {
               if (response != null && response.getStatus() == Response.Status.OK.getStatusCode()) {
                 accountAndSample.second().stop(Timer.builder(WAIT_FOR_LINKED_DEVICE_TIMER_NAME)
                     .publishPercentileHistogram(true)
+                    .minimumExpectedValue(Duration.ofMillis(100))
+                    .maximumExpectedValue(Duration.ofMinutes(1))
                     .tags(Tags.of(UserAgentTagUtil.getPlatformTag(userAgent)))
                     .register(Metrics.globalRegistry));
               }
@@ -448,6 +450,8 @@ public class DeviceController {
 
   private static boolean isCapabilityDowngrade(final Account account, final Set<DeviceCapability> capabilities) {
     final Set<DeviceCapability> requiredCapabilities = Arrays.stream(DeviceCapability.values())
+        // `ALWAYS_CAPABLE` capabilities are always assumed to be present, so we don't require callers to specify them
+        .filter(capability -> capability.getAccountCapabilityMode() != DeviceCapability.AccountCapabilityMode.ALWAYS_CAPABLE)
         .filter(DeviceCapability::preventDowngrade)
         .filter(account::hasCapability)
         .collect(Collectors.toSet());
@@ -541,7 +545,7 @@ public class DeviceController {
         UserAgentTagUtil.getPlatformTag(userAgent),
         io.micrometer.core.instrument.Tag.of(
             HAS_REGISTRATION_ID_TAG_NAME,
-            String.valueOf(transferArchiveUploadedRequest.registrationId().isPresent()))
+            String.valueOf(transferArchiveUploadedRequest.destinationDeviceRegistrationId().isPresent()))
     )).increment();
     return rateLimiters.getUploadTransferArchiveLimiter()
         .validateAsync(authenticatedDevice.accountIdentifier())
@@ -553,7 +557,7 @@ public class DeviceController {
           return accounts.recordTransferArchiveUpload(account,
               transferArchiveUploadedRequest.destinationDeviceId(),
               transferArchiveUploadedRequest.destinationDeviceCreated().map(Instant::ofEpochMilli),
-              transferArchiveUploadedRequest.registrationId(),
+              transferArchiveUploadedRequest.destinationDeviceRegistrationId(),
               transferArchiveUploadedRequest.transferArchive());
         });
   }
@@ -612,6 +616,8 @@ public class DeviceController {
               if (response != null && response.getStatus() == Response.Status.OK.getStatusCode()) {
                 accountAndSample.second().stop(Timer.builder(WAIT_FOR_TRANSFER_ARCHIVE_TIMER_NAME)
                     .publishPercentileHistogram(true)
+                    .minimumExpectedValue(Duration.ofMillis(250))
+                    .maximumExpectedValue(Duration.ofMinutes(5))
                     .tags(Tags.of(
                         UserAgentTagUtil.getPlatformTag(userAgent),
                         primaryPlatformTag(accountAndSample.first())))

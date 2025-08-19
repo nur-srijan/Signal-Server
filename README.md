@@ -8,7 +8,7 @@ Looking for protocol documentation? Check out the website!
 
 https://signal.org/docs/
 
-Mermaid Diagram
+Architectural Diagram
 ---------------
 
 ```mermaid
